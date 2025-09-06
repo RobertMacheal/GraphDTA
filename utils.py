@@ -2,113 +2,110 @@ import os
 import numpy as np
 from math import sqrt
 from scipy import stats
-from torch_geometric.data import InMemoryDataset, DataLoader
-from torch_geometric import data as DATA
 import torch
+from torch_geometric.data import InMemoryDataset, Data
+from torch_geometric.loader import DataLoader
+
+import torch_geometric
+from torch_geometric.data import data as pyg_data
+from torch_geometric.data import storage as pyg_storage
+
+# Allow safe unpickling of custom PyG classes in torch >= 2.6
+torch.serialization.add_safe_globals([
+    pyg_data.DataEdgeAttr,
+    pyg_data.DataTensorAttr,
+    pyg_storage.GlobalStorage,
+])
 
 class TestbedDataset(InMemoryDataset):
-    def __init__(self, root='/tmp', dataset='davis', 
-                 xd=None, xt=None, y=None, transform=None,
-                 pre_transform=None,smile_graph=None):
-
-        #root is required for save preprocessed data, default is '/tmp'
+    def __init__(self, root='data', dataset='davis',
+                 xd=None, xt=None, y=None,
+                 transform=None, pre_transform=None,
+                 smile_graph=None):
+        self.dataset = dataset  # e.g., 'kiba_train'
         super(TestbedDataset, self).__init__(root, transform, pre_transform)
-        # benchmark dataset, default = 'davis'
-        self.dataset = dataset
+
         if os.path.isfile(self.processed_paths[0]):
-            print('Pre-processed data found: {}, loading ...'.format(self.processed_paths[0]))
+            print(f'Pre-processed data found: {self.processed_paths[0]}, loading ...')
             self.data, self.slices = torch.load(self.processed_paths[0])
         else:
-            print('Pre-processed data {} not found, doing pre-processing...'.format(self.processed_paths[0]))
-            self.process(xd, xt, y,smile_graph)
+            print(f'Pre-processed data {self.processed_paths[0]} not found, doing pre-processing...')
+            self._custom_process(xd, xt, y, smile_graph)
             self.data, self.slices = torch.load(self.processed_paths[0])
-
-    @property
-    def raw_file_names(self):
-        pass
-        #return ['some_file_1', 'some_file_2', ...]
 
     @property
     def processed_file_names(self):
-        return [self.dataset + '.pt']
+        return [self.dataset + '.pt']  # e.g., kiba_train.pt
+
+    @property
+    def processed_dir(self):
+        return os.path.join(self.root, 'processed')
+
+    @property
+    def raw_file_names(self):
+        return []
 
     def download(self):
-        # Download to `self.raw_dir`.
         pass
 
-    def _download(self):
-        pass
+    def process(self):
+        pass  # unused, handled by _custom_process()
 
-    def _process(self):
-        if not os.path.exists(self.processed_dir):
-            os.makedirs(self.processed_dir)
-
-    # Customize the process method to fit the task of drug-target affinity prediction
-    # Inputs:
-    # XD - list of SMILES, XT: list of encoded target (categorical or one-hot),
-    # Y: list of labels (i.e. affinity)
-    # Return: PyTorch-Geometric format processed data
-    def process(self, xd, xt, y,smile_graph):
-        assert (len(xd) == len(xt) and len(xt) == len(y)), "The three lists must be the same length!"
+    def _custom_process(self, xd, xt, y, smile_graph):
+        assert len(xd) == len(xt) == len(y), "Lengths mismatch!"
         data_list = []
-        data_len = len(xd)
-        for i in range(data_len):
-            print('Converting SMILES to graph: {}/{}'.format(i+1, data_len))
+        for i in range(len(xd)):
+            print(f'Converting SMILES to graph: {i+1}/{len(xd)}')
             smiles = xd[i]
             target = xt[i]
-            labels = y[i]
-            # convert SMILES to molecular representation using rdkit
+            label = y[i]
+
             c_size, features, edge_index = smile_graph[smiles]
-            # make the graph ready for PyTorch Geometrics GCN algorithms:
-            GCNData = DATA.Data(x=torch.Tensor(features),
-                                edge_index=torch.LongTensor(edge_index).transpose(1, 0),
-                                y=torch.FloatTensor([labels]))
-            GCNData.target = torch.LongTensor([target])
-            GCNData.__setitem__('c_size', torch.LongTensor([c_size]))
-            # append graph, label and target sequence to data list
-            data_list.append(GCNData)
+            data = Data(
+                x=torch.tensor(features, dtype=torch.float),
+                edge_index=torch.tensor(edge_index, dtype=torch.long).transpose(1, 0),
+                y=torch.tensor([label], dtype=torch.float)
+            )
+            data.xt = torch.tensor(target, dtype=torch.float)
+            data.c_size = torch.tensor([c_size], dtype=torch.long)
+
+            data_list.append(data)
 
         if self.pre_filter is not None:
-            data_list = [data for data in data_list if self.pre_filter(data)]
-
+            data_list = [d for d in data_list if self.pre_filter(d)]
         if self.pre_transform is not None:
-            data_list = [self.pre_transform(data) for data in data_list]
+            data_list = [self.pre_transform(d) for d in data_list]
+
         print('Graph construction done. Saving to file.')
         data, slices = self.collate(data_list)
-        # save preprocessed data:
         torch.save((data, slices), self.processed_paths[0])
 
-def rmse(y,f):
-    rmse = sqrt(((y - f)**2).mean(axis=0))
-    return rmse
-def mse(y,f):
-    mse = ((y - f)**2).mean(axis=0)
-    return mse
-def pearson(y,f):
-    rp = np.corrcoef(y, f)[0,1]
-    return rp
-def spearman(y,f):
-    rs = stats.spearmanr(y, f)[0]
-    return rs
-def ci(y,f):
+# ===== Evaluation Metrics =====
+
+def rmse(y, f):
+    return sqrt(((y - f) ** 2).mean())
+
+def mse(y, f):
+    return ((y - f) ** 2).mean()
+
+def pearson(y, f):
+    return np.corrcoef(y, f)[0, 1]
+
+def spearman(y, f):
+    return stats.spearmanr(y, f)[0]
+
+def ci(y, f):
     ind = np.argsort(y)
-    y = y[ind]
-    f = f[ind]
-    i = len(y)-1
-    j = i-1
-    z = 0.0
+    y, f = y[ind], f[ind]
+    n = len(y)
     S = 0.0
-    while i > 0:
-        while j >= 0:
+    z = 0.0
+    for i in range(n):
+        for j in range(i):
             if y[i] > y[j]:
-                z = z+1
-                u = f[i] - f[j]
-                if u > 0:
-                    S = S + 1
-                elif u == 0:
-                    S = S + 0.5
-            j = j - 1
-        i = i - 1
-        j = i-1
-    ci = S/z
-    return ci
+                z += 1
+                if f[i] > f[j]:
+                    S += 1
+                elif f[i] == f[j]:
+                    S += 0.5
+    return S / z if z != 0 else 0.0

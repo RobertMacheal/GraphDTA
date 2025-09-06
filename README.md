@@ -1,79 +1,150 @@
-# Resources:
 
-+ README.md: this file.
-+ data/davis/folds/test_fold_setting1.txt,train_fold_setting1.txt; data/davis/Y,ligands_can.txt,proteins.txt
-  data/kiba/folds/test_fold_setting1.txt,train_fold_setting1.txt; data/kiba/Y,ligands_can.txt,proteins.txt
-  These file were downloaded from https://github.com/hkmztrk/DeepDTA/tree/master/data
+# GraphDTA-ESM Fusion (Baseline / Transformer / CrossAttention)
 
-###  Source codes:
-+ create_data.py: create data in pytorch format
-+ utils.py: include TestbedDataset used by create_data.py to create data, and performance measures.
-+ training.py: train a GraphDTA model.
-+ models/ginconv.py, gat.py, gat_gcn.py, and gcn.py: proposed models GINConvNet, GATNet, GAT_GCN, and GCNNet receiving graphs as input for drugs.
+This repository extends GraphDTA by incorporating ESM protein embeddings and two fusion strategies (Transformer, CrossAttention), along with a no-fusion baseline. It supports both single runs and PBS qsub grid search on high-performance computing (HPC) systems.
 
-# Step-by-step running:
+## 1) Repository Structure (Key Files)
 
-## 0. Install Python libraries needed
-+ Install pytorch_geometric following instruction at https://github.com/rusty1s/pytorch_geometric
-+ Install rdkit: conda install -y -c conda-forge rdkit
-+ Or run the following commands to install both pytorch_geometric and rdkit:
 ```
-conda create -n geometric python=3
-conda activate geometric
-conda install -y -c conda-forge rdkit
-conda install pytorch torchvision cudatoolkit -c pytorch
-pip install torch-scatter==latest+cu101 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-sparse==latest+cu101 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-cluster==latest+cu101 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
-pip install torch-spline-conv==latest+cu101 -f https://pytorch-geometric.com/whl/torch-1.4.0.html
+GraphDTA_project/
+├── create_data.py              # Generate PyG .pt data (KIBA & Davis, including ESM)
+├── training.py                 # Train: baseline / transformer / crossattention
+├── grid_search.py             # Batch hyperparameter search on HPC (PBS qsub)
+├── utils.py                   # TestbedDataset, metrics, and torch.load safety whitelist
+├── models/
+│   ├── ginconv.py             # Baseline GIN model (no fusion)
+│   ├── gin_backbone.py        # GIN backbone (for fusion models)
+│   ├── gin_fusion.py          # Optional GIN fusion wrapper (not currently used in main workflow)
+│   ├── fusion_transformer.py  # Transformer fusion
+│   └── fusion_crossattention.py # CrossAttention fusion
+├── data/
+│   ├── kiba/, davis/          # Raw data and folds from DeepDTA/GraphDTA
+│   └── processed/             # Generated *.pt data files
+└── analysis_scripts/         # Scripts for extraction, comparison, and plotting (optional)
+```
+
+## 2) Environment Setup
+
+Conda environment (Python 3.9, CPU-only example)
+
+```bash
+conda create -n graphdta_env python=3.9 -y
+conda activate graphdta_env
+```
+
+- **Install PyTorch CPU version**
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
+
+- **Dependencies**
+
+```bash
+pip install numpy pandas scikit-learn networkx rdkit-pypi
 pip install torch-geometric
-
+pip install transformers
 ```
 
-## 1. Create data in pytorch format
-Running
-```sh
-conda activate geometric
+> ⚠️ For GPU usage: Install PyTorch and torch-geometric compatible with your CUDA version manually.
+
+## 3) Data Preparation
+
+Download raw data from DeepDTA/GraphDTA. The directory structure should be:
+
+```
+data/kiba/   and  data/davis/
+├── folds/train_fold_setting1.txt
+├── folds/test_fold_setting1.txt
+├── ligands_can.txt
+├── proteins.txt
+└── Y
+```
+
+Generate ESM cache, SMILES graphs, and PyG .pt data:
+
+```bash
 python create_data.py
 ```
-This returns kiba_train.csv, kiba_test.csv, davis_train.csv, and davis_test.csv, saved in data/ folder. These files are in turn input to create data in pytorch format,
-stored at data/processed/, consisting of  kiba_train.pt, kiba_test.pt, davis_train.pt, and davis_test.pt.
 
-## 2. Train a prediction model
-To train a model using training data. The model is chosen if it gains the best MSE for testing data.  
-Running 
+Upon success, you will find the following in `data/processed/`:
 
-```sh
-conda activate geometric
-python training.py 0 0 0
+- kiba_train.pt, kiba_valid.pt, kiba_test.pt
+- davis_train.pt, davis_valid.pt, davis_test.pt
+
+> If you change the PyTorch version and .pt files become unreadable, delete `data/processed/*.pt` and rerun `create_data.py`.
+
+## 4) Single Run
+
+- `dataset_idx`: 0 = Davis, 1 = Kiba  
+- `model_idx`: 0 = GINConvNet (commonly used for baseline)  
+- `fusion`: 0 = Transformer, 1 = CrossAttention, omit for baseline (no fusion)
+
+Example (KIBA, Transformer, bs=512, lr=1e-4):
+
+```bash
+python training.py --dataset_idx 1 --model_idx 0 --fusion 0 --batch_size 512 --lr 0.0001
 ```
 
-where the first argument is for the index of the datasets, 0/1 for 'davis' or 'kiba', respectively;
- the second argument is for the index of the models, 0/1/2/3 for GINConvNet, GATNet, GAT_GCN, or GCNNet, respectively;
- and the third argument is for the index of the cuda, 0/1 for 'cuda:0' or 'cuda:1', respectively. 
- Note that your actual CUDA name may vary from these, so please change the following code accordingly:
-```sh
-cuda_name = "cuda:0"
-if len(sys.argv)>3:
-    cuda_name = "cuda:" + str(int(sys.argv[3])) 
+Baseline (no fusion):
+
+```bash
+python training.py --dataset_idx 1 --model_idx 0 --batch_size 512 --lr 0.0001
 ```
 
-This returns the model and result files for the modelling achieving the best MSE for testing data throughout the training.
-For example, it returns two files model_GATNet_davis.model and result_GATNet_davis.csv when running GATNet on Davis data.
+After running, you will obtain:
 
-## 3. Train a prediction model with validation 
+- Best model weights: `model_{Model}_{Dataset}_{fusion_tag}.model`
+- Best validation metrics: `result_{Model}_{Dataset}_{fusion_tag}.csv`
+- Training history: Default `history_{Model}_{Dataset}_{fusion_tag}.csv` or as specified by `--history_file`
 
-In "3. Train a prediction model", a model is trained on training data and chosen when it gains the best MSE for testing data.
-This follows how a model was chosen in https://github.com/hkmztrk/DeepDTA. The result by two ways of training is comparable though.
+## 5) Grid Search on HPC (PBS qsub)
 
-In this section, a model is trained on 80% of training data and chosen if it gains the best MSE for validation data, 
-which is 20% of training data. Then the model is used to predict affinity for testing data.
+### Usage
 
-Same arguments as in "3. Train a prediction model" are used. E.g., running 
-
-```sh
-python training_validation.py 0 0 0
+```bash
+python grid_search.py [dataset_idx: 0|1] [-t | -c | -b]
+-t = Transformer
+-c = CrossAttention
+-b = Baseline (no fusion)
 ```
 
-This returns the model achieving the best MSE for validation data throughout the training and performance results of the model on testing data.
-For example, it returns two files model_GATNet_davis.model and result_GATNet_davis.csv when running GATNet on Davis data.
+Example: Search Transformer hyperparameters on KIBA (bs ∈ {128, 256, 512}, lr ∈ {1e-3, 5e-4, 1e-4})
+
+```bash
+python grid_search.py 1 -t
+```
+
+The script will generate and submit multiple jobs via `qsub` in the `pbs_jobs/` directory. Each job internally executes something like:
+
+```bash
+python training.py     --dataset_idx {dataset_idx}     --model_idx 0     --cuda 0     --fusion {0/1 or omitted}     --batch_size {128/256/512}     --lr {1e-3/5e-4/1e-4}     --history_file history_{tag}_bs{bs}_lr{lr}_ds{dataset_idx}.csv
+```
+
+> If the cluster limits the "maximum concurrent jobs per user" (e.g., `qsub: would exceed complex's per-user limit`), this is a normal prompt—either wait or reduce the search scope.
+
+## 6) Result Analysis
+
+You have the following scripts (examples) to extract the best epoch from history CSV, generate ablation comparison bar charts, and rank hyperparameters:
+
+- `extract_ablation_results.py`: Extract best RMSE/MSE/... from `history_*.csv` for each mode.
+- `plot_ablation_bars.py`: Generate bar charts (RMSE/MSE/CI/Pearson/Spearman).
+- `analyze_hyperparam_ranking.py`: Rank by multiple metrics (average rank possible).
+
+### Example
+
+Extract optimal records for KIBA, bs=512, lr=1e-4 across three modes:
+
+```bash
+python extract_ablation_results.py
+```
+
+### Example
+
+Aggregate all `history` files in a directory, rank hyperparameters, and output CSV + multiple plots:
+
+```bash
+python analyze_hyperparam_ranking.py
+```
+
+These scripts typically include a `FOLDER = "fusion_results"` or absolute path parameter—remember to adjust it to your result directory.

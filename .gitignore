@@ -1,0 +1,11 @@
+data/
+logs/
+"*.pt"
+"*.pth"
+"*.ckpt"
+"*.bin"
+"*.zip"
+"*.tar.gz"
+"*.7z"
+"*.npy"
+"*.npz"
